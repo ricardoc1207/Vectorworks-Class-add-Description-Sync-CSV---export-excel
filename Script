@@ -1,0 +1,137 @@
+
+# -*- coding: utf-8 -*-
+import vs
+import csv
+import os
+
+# ===== CONFIGURACIÓN =====
+# Si lo dejas vacío, se abrirá un diálogo para seleccionar el CSV.
+CSV_PATH = ""  # Ej.: r"/Users/ricardo/Downloads/classes_descriptions.csv"
+
+CLASS_COL = "CLASS NAME"
+DESC_COL  = "DESCRIPTION"
+
+# ¿Aplicar actualizaciones cuando la celda DESCRIPTION esté vacía?
+UPDATE_WHEN_EMPTY = False
+
+def pick_csv_if_needed(path):
+    """Devuelve la ruta al CSV. Si no hay, abre diálogo 'Abrir archivo'."""
+    if path and os.path.isfile(path):
+        return path
+
+    # Diálogo para escoger archivo CSV
+    ok, chosen = vs.GetFileN("Selecciona el CSV (UTF-8)", "", "", "CSV|*.csv")
+    if ok and chosen and os.path.isfile(chosen):
+        return chosen
+
+    # Como alternativa, pedir ruta manualmente (texto)
+    try:
+        # vs.StrDialog existe; pedir ruta como texto si el usuario canceló el diálogo de archivo
+        manual = vs.StrDialog("Ruta completa del CSV (UTF-8). Ej.: /Users/tu_usuario/Downloads/archivo.csv", "")
+        manual = manual.strip()
+        if manual and os.path.isfile(manual):
+            return manual
+    except Exception:
+        pass
+
+    vs.AlrtDialog("No se seleccionó un CSV válido.")
+    return None
+
+def sniff_delimiter(sample_bytes):
+    """Detecta separador ; o , automáticamente."""
+    try:
+        sample = sample_bytes.decode("utf-8-sig", errors="ignore")
+        dialect = csv.Sniffer().sniff(sample, delimiters=";,")
+        return dialect.delimiter
+    except Exception:
+        # Por región (NL/BE) suele ser ';'
+        return ";"
+
+def get_current_description(h):
+    """Obtiene la descripción actual de la clase (robusto a variantes de API)."""
+    try:
+        gd = vs.GetDescriptionText(h)
+        if isinstance(gd, tuple):
+            return (gd[1] or "").strip()
+        return (gd or "").strip()
+    except Exception:
+        return ""
+
+def set_description(h, text):
+    """Establece la descripción de la clase."""
+    vs.SetDescriptionText(h, text)
+
+def update_class_descriptions_from_csv(path):
+    # Lectura y detección de separador
+    with open(path, "rb") as fb:
+        sample = fb.read(8192)
+    delim = sniff_delimiter(sample)
+
+    updated, missing, empty, not_changed, errors = [], [], [], [], []
+
+    with open(path, newline="", encoding="utf-8-sig") as f:
+        reader = csv.DictReader(f, delimiter=delim)
+        headers = [h.strip() for h in (reader.fieldnames or [])]
+
+        # Validación de cabeceras
+        if CLASS_COL not in headers or DESC_COL not in headers:
+            vs.AlrtDialog(
+                "Cabeceras inválidas.\nSe requieren: '{}' y '{}'\nEncontradas: {}".format(CLASS_COL, DESC_COL, headers)
+            )
+            return
+
+        for i, row in enumerate(reader, start=2):  # start=2: fila 2 en Excel tras cabeceras
+            class_name = (row.get(CLASS_COL) or "").strip()
+            new_desc   = (row.get(DESC_COL)  or "").strip()
+
+            if not class_name:
+                continue
+
+            h = vs.GetObject(class_name)
+            if not h:
+                missing.append(class_name)
+                continue
+
+            if not new_desc and not UPDATE_WHEN_EMPTY:
+                empty.append(class_name)
+                continue
+
+            current_desc = get_current_description(h)
+
+            if new_desc == current_desc:
+                not_changed.append(class_name)
+                continue
+
+            try:
+                set_description(h, new_desc)
+                updated.append(class_name)
+            except Exception as e:
+                errors.append((class_name, str(e)))
+
+    # Resumen
+    msg = []
+    msg.append("✅ Clases actualizadas: {}".format(len(updated)))
+    msg.append("• Sin cambios (misma descripción): {}".format(len(not_changed)))
+    if not UPDATE_WHEN_EMPTY:
+        msg.append("• Sin descripción en CSV (omitidas): {}".format(len(empty)))
+    if missing:
+        msg.append("⚠️ No encontradas en el archivo VWX ({}):".format(len(missing)))
+        msg.extend(["- " + n for n in missing[:15]])
+        if len(missing) > 15:
+            msg.append("… ({} más)".format(len(missing) - 15))
+    if errors:
+        msg.append("❗ Errores ({}):".format(len(errors)))
+        for cls, err in errors[:10]:
+            msg.append("- {} → {}".format(cls, err))
+        if len(errors) > 10:
+            msg.append("… (más errores no listados)")
+
+    vs.AlrtDialog("\n".join(msg))
+
+def main():
+    path = pick_csv_if_needed(CSV_PATH)
+    if not path:
+        return
+    update_class_descriptions_from_csv(path)
+
+main()
